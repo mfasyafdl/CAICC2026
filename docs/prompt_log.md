@@ -19,3 +19,50 @@ scaffold and a minimal runnable welcome screen in this step.
 
 **Outcome:** Created the full scaffold and a minimal runnable Gradio welcome
 screen. Core and UI logic remain unimplemented (stubs only), as directed.
+
+## 2. Patient-record schema, module interfaces, fixtures, data contract
+
+**Prompt:** Define the shared patient-record schema and module interfaces in
+`core/schema.py` and `docs/data_contract.md` (patient/reporter details,
+complaint, symptoms, onset/duration, severity, medicines including herbal
+remedies, allergies/history, concerns, missing information; preserve patient
+wording; distinguish unknown from explicit denial with null for unknown).
+Document callable interfaces for extraction, choosing a follow-up question,
+merging an answer, checking rule-based alerts, and generating a summary
+(doctor_card, patient_script, priority_questions), including how the UI
+supplies previously asked questions and the current record. Create fictional
+fixtures for Person 2.
+
+**Outcome:** Implemented `core/schema.py` (PatientRecord, Medicine,
+QuestionAnswer, Alert, SummaryOutput, validation, dict round-trip, unknown vs
+`*_denied` semantics), `core/fixtures.py` (4 fictional fixtures), importable
+interface stubs in `core/extraction.py`, `core/questions.py`,
+`core/alerts.py`, `core/summary.py`, and rewrote `docs/data_contract.md`
+(v0.2). Note for Person 2: summary output changed from the scaffold contract
+(`doctor_summary`/`pdf_bytes` → `doctor_card`/`patient_script`/
+`priority_questions`); PDF will be a separate interface. Checks:
+`pytest -q tests/test_core` → 26 passed (schema + fixtures + package tests).
+
+## 3. ModelScope LLM client (`core/llm.py`)
+
+**Prompt:** Implement `core/llm.py` against the OpenAI-compatible ModelScope
+endpoint `https://api-inference.modelscope.ai/v1`; load
+`MODELSCOPE_API_KEY`/`MODELSCOPE_MODEL` from server env or local `.env`,
+default model `zai-org/GLM-5.2`, allow only the four approved models, add
+`.env.example` placeholders, never read OpenCode credentials, finite timeouts,
+bounded retries, safe English errors for auth/quota/network failure, never log
+tokens or patient text, validate schema and test client failure handling; run
+a small fictional live request only if the app token is configured, otherwise
+report pending. Clarification asked and answered: the four approved models
+are `zai-org/GLM-5.2`, `deepseek-ai/DeepSeek-V4-Pro-0813`,
+`stepfun-ai/Step-3.5-Flash`, `Qwen/Qwen3.8-27B`.
+
+**Outcome:** Implemented `core/llm.py` (stdlib-only OpenAI-compatible client;
+`load_config` with env-over-`.env` precedence; four-model allowlist; 60 s
+default timeout; 2 bounded retries with capped backoff for network/5xx only;
+`LLMAuthError`/`LLMQuotaError`/`LLMNetworkError`/`LLMServerError`/
+`LLMResponseError`/`ConfigError` with fixed safe English messages;
+`chat`/`chat_json` with schema validation). Updated `.env.example`. Added
+`tests/test_core/test_llm.py` (23 tests, transport faked, no network).
+Checks: `pytest -q tests/test_core` → 43 passed. Live request: **pending**
+(no `MODELSCOPE_API_KEY` in server environment or local `.env` at run time).
