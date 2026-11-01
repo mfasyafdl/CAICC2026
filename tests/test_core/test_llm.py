@@ -125,6 +125,16 @@ def test_only_modelscope_vars_are_read(monkeypatch, tmp_path):
     assert "sentinel" not in repr(cfg)
 
 
+def test_chat_uses_local_dotenv_when_server_env_is_empty(monkeypatch, tmp_path):
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("MODELSCOPE_API_KEY=file-key\n")
+    monkeypatch.delenv("MODELSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(llm, "default_dotenv_path", lambda: dotenv)
+    transport, _ = _install(monkeypatch, [(200, _ok_body("ok"))])
+    assert chat("s", "u") == "ok"
+    assert transport.calls[0]["headers"]["Authorization"] == "Bearer file-key"
+
+
 def test_chat_rejects_unapproved_model_without_network(monkeypatch):
     transport, _ = _install(monkeypatch, [])
     with pytest.raises(ConfigError):

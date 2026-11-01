@@ -194,6 +194,12 @@ def _http_post(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_config() -> LLMConfig:
+    """Resolve config for calls that do not pass one explicitly: server
+    environment first, then the project-local ``.env`` file."""
+    return load_config(dotenv_path=default_dotenv_path())
+
+
 def chat(
     system: str,
     user: str,
@@ -214,7 +220,7 @@ def chat(
     - Raises safe, English ``LLMError`` subclasses; messages never contain
       the API key or the request/response text.
     """
-    cfg = config if config is not None else load_config()
+    cfg = config if config is not None else _resolve_config()
     chosen_model = model if model is not None else cfg.model
     if chosen_model not in ALLOWED_MODELS:
         raise ConfigError(

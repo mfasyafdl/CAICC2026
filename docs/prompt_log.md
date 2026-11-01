@@ -64,5 +64,14 @@ default timeout; 2 bounded retries with capped backoff for network/5xx only;
 `LLMResponseError`/`ConfigError` with fixed safe English messages;
 `chat`/`chat_json` with schema validation). Updated `.env.example`. Added
 `tests/test_core/test_llm.py` (23 tests, transport faked, no network).
-Checks: `pytest -q tests/test_core` → 43 passed. Live request: **pending**
-(no `MODELSCOPE_API_KEY` in server environment or local `.env` at run time).
+Checks: `pytest -q tests/test_core` → 44 passed (incl. local-`.env` fallback
+for `chat()`). Live connection check (after the key was configured): endpoint
+and authentication OK. Schema-validated fictional extraction OK on
+`zai-org/GLM-5.2` (attempt 1) and `Qwen/Qwen3.8-27B`;
+`deepseek-ai/DeepSeek-V4-Pro-0813` is reachable (HTTP 200) but failed schema
+validation on the extraction prompt; `stepfun-ai/Step-3.5-Flash` returns
+HTTP 400 "no provider supported" (currently unavailable on the endpoint).
+Findings for the extraction task: the prompt must inline the exact record
+schema (models otherwise invent field names), and `zai-org/GLM-5.2` is a
+reasoning model (hidden `reasoning_content` tokens), so JSON generation needs
+a generous `max_tokens`.
