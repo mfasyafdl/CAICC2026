@@ -44,6 +44,7 @@ __all__ = [
     "MODEL_ENV",
     "chat",
     "chat_json",
+    "chat_json_repairable",
     "default_dotenv_path",
     "load_config",
 ]
@@ -340,6 +341,60 @@ def chat_json(
             "The model returned an invalid response. Please try again."
         )
     return data
+
+
+def chat_json_repairable(
+    system: str,
+    user: str,
+    *,
+    validate: Callable[[dict[str, Any]], list[str]],
+    repair_note: str | None = None,
+    max_repairs: int = 1,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """As :func:`chat_json`, with bounded JSON repair.
+
+    When the response is not valid JSON or fails ``validate``, the request is
+    repeated at most ``max_repairs`` times (default 1) with a repair note
+    appended, so the total number of model calls is bounded by
+    ``max_repairs + 1``. On the repair attempt the specific validation problems
+    (fixed English labels only — never patient text) are appended so the model
+    can fix them; this is the seam through which source/record-aware checks
+    reach the bounded repair path. Raises ``LLMResponseError`` with a safe
+    message when every attempt is invalid.
+    """
+    if not callable(validate):
+        raise ConfigError("chat_json_repairable requires a validate callable.")
+    note = repair_note or (
+        "Your previous reply was not a valid JSON object matching the "
+        "required schema."
+    )
+    attempts = max_repairs + 1
+    last_problems: list[str] = []
+    for attempt in range(1, attempts + 1):
+        message = user
+        if attempt > 1:
+            parts = [note]
+            if last_problems:
+                parts.append(
+                    "Problems found: " + "; ".join(last_problems) + "."
+                )
+            parts.append("Reply with only the corrected JSON object.")
+            message = user + "\n\n" + " ".join(parts)
+        raw = chat(system, message, **kwargs)
+        try:
+            data = _extract_json_object(raw)
+            errors = validate(data)
+        except LLMResponseError:
+            errors = ["the response was not a valid JSON object"]
+        if not errors:
+            return data
+        last_problems = errors
+        logger.debug("json response invalid on attempt %d/%d", attempt, attempts)
+    raise LLMResponseError(
+        "The model returned an invalid response after the allowed repair "
+        "attempts. Please try again."
+    )
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:

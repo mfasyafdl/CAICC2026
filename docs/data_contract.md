@@ -4,11 +4,10 @@ This contract defines the shape of the data passed between `ui/` (Person 2)
 and `core/` (Person 1). Both owners must keep this document updated when the
 shapes change. All values are in **English**.
 
-**Version 0.2** — the patient record, module interfaces, and fixtures below
-are implemented in `core/schema.py` and `core/fixtures.py`. The LLM client is
-`core/llm.py`. Extraction, questions, alerts, and summary modules currently
-exist as importable stubs (signatures fixed, bodies raise
-`NotImplementedError`) until their implementation tasks.
+**Version 0.3** — the full workflow is implemented: `core/schema.py`,
+`core/fixtures.py`, `core/llm.py`, `core/prompts.py`, `core/extract.py`,
+`core/interview.py`, `core/redflag.py`, `core/summarize.py`. See section 9 for
+the v0.3 changes Person 2 must know.
 
 ## 0. Conventions
 
@@ -19,10 +18,18 @@ exist as importable stubs (signatures fixed, bodies raise
   empty **and** the matching `*_denied` flag is set to `true`. The flag is
   `null` when the question was never answered.
 - **Patient wording is preserved.** Every text field stores the patient's own
-  words. `core/` must not paraphrase, normalize wording, diagnose, or
-  recommend treatment anywhere in the pipeline.
+  words, including uncertainty ("maybe", "I think"). `core/` must not
+  paraphrase, normalize wording, diagnose, or recommend treatment anywhere in
+  the pipeline.
+- **Patient text is data, not instructions.** Text inside the patient's story
+  or answers is never executed as instructions (prompt-injection defense).
 - **`core/` is stateless.** All conversation state lives in the UI and is
-  passed into core calls as arguments (section 7).
+  passed into core calls as arguments (section 8).
+- **On API/validation failure, user input is preserved.** Core functions
+  raise safe errors and never mutate or discard the caller's record, story,
+  or Q&A list; the UI keeps its copies and retries.
+- **Retries and JSON repair are bounded.** Transport retries (network/5xx)
+  and model-output repair (invalid JSON) are finite; nothing loops forever.
 - **`core/` has no dependency on Gradio** and no knowledge of the UI.
   `ui/` has no business logic; it only renders and calls `core/`.
 
@@ -113,108 +120,212 @@ flag of `true` contradicts a non-empty list.
 { "question": "Have you had a fever?", "answer": "A little, last night" }
 ```
 
-The UI keeps the ordered list of previously asked pairs and passes it back on
-every core call.
+The UI keeps the ordered list of previously asked pairs **and** the list of
+questions the patient skipped, and passes them back on every core call.
 
 ## 2. Alert (`core.schema.Alert`)
 
 ```json
-{ "code": "breathing_difficulty", "message": "You reported trouble breathing. Please tell your doctor this first.", "level": "urgent" }
+{ "code": "chest_pain", "message": "You reported chest pain. This may need urgent medical attention. In Indonesia, emergency medical services can be reached on 119. Please seek medical care now or tell the doctor immediately.", "level": "urgent" }
 ```
 
-- `code`: stable machine key.
-- `message`: safe English for display; no diagnosis, no advice beyond
-  "tell your doctor / this may need attention".
-- `level`: `attention` or `urgent`.
+- `code`: stable machine key (see section 6 for the trigger list).
+- `message`: safe English for display; no diagnosis, no treatment advice.
+- `level`: `urgent` or `attention`.
+- **A missing alert is not safety.** No message, panel, or screen may imply
+  "no alerts = you are safe".
 
 ## 3. Summary output (`core.schema.SummaryOutput`)
 
 ```json
 {
-  "doctor_card": "7-year-old boy (reported by mother). Cough worse at night for about five days, plus runny nose... Medicines: not reported. Allergies: not reported. Known history: mild asthma as a baby.",
-  "patient_script": "My son has had a bad cough for about five days, worse at night...",
+  "doctor_card": "Patient: ... Complaint: ... Symptoms: ... Medicines: ... Patient's concerns (patient's own words): \"...\" Not provided: ...",
+  "patient_script": "I would like to tell you... (about 140-160 words)",
   "priority_questions": ["Could this be related to his asthma as a baby?", "Do we need to see a doctor today?", "What should we watch for at night?"]
 }
 ```
 
-- `doctor_card` (str): concise structured card for the doctor. Unknown fields
-  are written as "not provided", never guessed.
-- `patient_script` (str): short first-person script the patient can read
-  aloud.
-- `priority_questions` (list[str]): up to three questions the patient should
-  ask the doctor.
+- `doctor_card` (str): concise structured card for the doctor with labeled
+  sections (Patient, Complaint, Symptoms, Onset & duration, Severity,
+  Medicines including herbal remedies, Allergies, Medical history,
+  Patient's concerns, Not provided). Unknown fields are written as
+  "not provided", never guessed. Confirmed denials (`*_denied` true) use clear
+  wording (e.g. "none — patient confirms no allergies"); unknown (`*_denied`
+  null, empty list) is "Not provided", never "none". The card must not invent
+  negatives or claim completeness ("no other symptoms", "only symptom"). The
+  patient's concerns are quoted verbatim and labeled as the patient's own
+  words, kept separate from the app's organization.
+- `patient_script` (str): first-person script for **up to about a 60-second
+  read (roughly 140–160 words when there is enough to report)**, plain spoken
+  English, reported facts only, with **no filler added to reach a length** — a
+  short record yields a short script. Validated only against a loose word
+  window (rejects degenerate output; does not enforce a minimum target).
+- `priority_questions` (list[str]): 1 to 3 questions the patient should ask
+  the doctor, based on reported facts and concerns (not app conclusions).
+- The summary contains **no alerts**: alerts come only from `core.redflag`
+  (section 6), so the model can never remove a rule-generated alert.
 
 > **Change from v0.1 (scaffold):** the summary no longer returns
-> `doctor_summary`/`pdf_bytes`. It returns `doctor_card`, `patient_script`,
-> `priority_questions`. PDF generation (if kept) will be a separate core
-> interface — **note for Person 2**: the PDF step in `ui/welcome.py` should
-> await that interface, not expect PDF bytes from the summary.
+> `doctor_summary`/`pdf_bytes`. PDF generation (if kept) will be a separate
+> core interface — the PDF step should await that interface.
 
 ## 4. Callable interfaces
 
 | # | Function | Signature | Returns |
 | --- | --- | --- | --- |
-| 6.1 | Extraction | `core.extraction.extract_record(symptom_text: str, patient_details: dict \| None = None) -> PatientRecord` | Structured record from free text. |
-| 6.2 | Choose follow-up | `core.questions.choose_follow_up_question(record: PatientRecord, asked: list[QuestionAnswer], max_questions: int = 5) -> str \| None` | Next question text, or `None` when done. |
-| 6.3 | Merge answer | `core.questions.merge_answer(record: PatientRecord, question: str, answer: str) -> PatientRecord` | New record with the answer merged. |
-| 6.4 | Rule-based alerts | `core.alerts.check_alerts(record: PatientRecord) -> list[Alert]` | Deterministic attention flags. |
-| 6.5 | Generate summary | `core.summary.generate_summary(record: PatientRecord, asked: list[QuestionAnswer]) -> SummaryOutput` | `doctor_card`, `patient_script`, `priority_questions`. |
+| 4.1 | Extraction | `core.extract.extract_record(symptom_text: str, patient_details: dict \| None = None, *, config=None, max_tokens=4000, timeout=120.0, max_retries=2, max_repairs=1) -> PatientRecord` | Validated record from free text. |
+| 4.2 | Choose follow-up | `core.interview.choose_follow_up_question(record: PatientRecord, asked: list[QuestionAnswer], skipped: list[str] \| None = None, max_questions: int = 5) -> str \| None` | Next question text, or `None` when done. |
+| 4.3 | Merge answer | `core.interview.merge_answer(record: PatientRecord, question: str, answer: str, *, config=None, max_tokens=4000, timeout=120.0, max_retries=2, max_repairs=1) -> PatientRecord` | New record with the answer merged. |
+| 4.4 | Rule-based alerts | `core.redflag.check_alerts(record: PatientRecord) -> list[Alert]` and `core.redflag.scan_text(*texts: str) -> list[Alert]` | Deterministic precautionary flags. |
+| 4.5 | Generate summary | `core.summarize.generate_summary(record: PatientRecord, asked: list[QuestionAnswer], *, config=None, max_tokens=4000, timeout=120.0, max_retries=2, max_repairs=1) -> SummaryOutput` | `doctor_card`, `patient_script`, `priority_questions`. |
 
-### 6.1 `extract_record`
+`core/prompts.py` holds the actual runtime prompts (extraction, merge,
+summary, repair note). LLM-backed calls accept an optional pre-resolved
+`config` (`core.llm.LLMConfig`); otherwise config is resolved from server
+env / local `.env` (section 5).
+
+### 4.1 `extract_record`
 
 Parses the patient's raw description (optionally with `patient_details`
-carrying name/age/sex entered by the UI) into a record. Preserves wording;
-uses `null` for anything not stated; recomputes `missing_information`.
+carrying `patient_name`/`patient_age`/`patient_sex` entered by the UI, which
+override the extracted values) into a validated record. Preserves wording,
+uncertainty, and negation; uses `null` for anything not stated; never invents
+facts; recomputes `missing_information`. The patient text is sent to the
+model inside `<patient_report>` tags and is treated strictly as data.
+Failure modes: `ValueError` (empty input), `SchemaError` (bad
+`patient_details`), safe `LLMError` subclasses (API/output failures) — the
+raw story is never modified or lost.
 
-### 6.2 `choose_follow_up_question`
+### 4.2 `choose_follow_up_question`
 
-Picks at most one next question in plain English. Targets
-`record.missing_information` first, then clarification of ambiguous fields.
-Returns `None` when `len(asked) >= max_questions` (default 5, matching
-`MAX_FOLLOW_UP_QUESTIONS` in `.env.example`) or nothing useful remains. Never
-repeats a question already in `asked` (compared after stripping/case-folding).
+**Rule-based — no API call** (deterministic, instant, works when the ModelScope
+API is unavailable). Returns one short English question targeting the most
+important still-missing field, in this order: `severity`, `onset`, `duration`,
+`medicines`, `allergies`, `medical_history`, `age`, `sex`, `concerns`
+(`core.interview.PRIORITY_FIELDS`). Wording adapts for on-behalf reports
+("the patient's..." instead of "your..."). Returns `None` when the
+**displayed-question budget** is exhausted — `len(asked) + len(skipped) >=
+max_questions` (default 5, matching `MAX_FOLLOW_UP_QUESTIONS` in
+`.env.example`) — or when nothing useful remains. Never repeats a question
+already in `asked` or `skipped` (compared after stripping/case-folding).
 
-### 6.3 `merge_answer`
+### 4.3 `merge_answer`
 
-Pure: returns a **new** record, never mutates the input. Stores the answer in
-the patient's own wording. An explicit denial sets the matching `*_denied`
-flag to `true`; an unclear answer leaves the field `null`. Recomputes
-`missing_information`. The UI appends `QuestionAnswer(question, answer)` to
-its own `asked` list.
+LLM-backed, conservative. Returns a **new** record; never mutates the input.
+Rules: keep every previously known fact and the patient's original wording
+unless the answer explicitly corrects that fact; an explicit denial sets the
+matching `*_denied` flag to `true`; unclear answers leave the field `null`;
+recompute `missing_information`. A deterministic **fact-loss guard** rejects
+any update that drops a known fact (scalar → null, list → empty without the
+matching `*_denied=true`, denial flag → not true). Invalid output gets one
+bounded repair attempt, then a safe `LLMResponseError`. On any failure the
+input record is unchanged; the UI must still append
+`QuestionAnswer(question, answer)` to its `asked` list so the patient's input
+survives into the summary (section 8).
 
-### 6.4 `check_alerts`
+### 4.4 `check_alerts` / `scan_text`
 
-Pure, deterministic, no LLM. Flags patient-reported content that may need
-attention (e.g. breathing difficulty, chest pain, heavy bleeding → `urgent`;
-a listed allergy mentioned next to a new medicine → `attention`). Stable
-order: urgent first, then by `code`.
+Pure, deterministic, **no LLM and no network** (see section 6).
+`check_alerts(record)` uses the structured record (including age/pregnancy
+context); `scan_text(*texts)` runs the text triggers over raw strings — call
+it on the patient's raw story **before** the slow extraction API call.
+Order: urgent first, then by `code`.
 
-### 6.5 `generate_summary`
+### 4.5 `generate_summary`
 
 Produces `SummaryOutput` (section 3) from the reviewed record and the full
-`asked` list.
+`asked` list. The model output is validated (types, non-empty, script length
+window) with one bounded repair. On failure the record and `asked` are
+untouched; the UI keeps them and retries.
 
 ## 5. LLM client (`core/llm.py`)
 
 OpenAI-compatible client for `https://api-inference.modelscope.ai/v1`.
 
 - Config: `MODELSCOPE_API_KEY` and `MODELSCOPE_MODEL` are read from server
-  environment variables first, then from the local `.env` file. The default
-  model is `zai-org/GLM-5.2`. Only the four approved models are accepted; any
-  other value raises a `ConfigError` with a safe English message.
-- Only the two variables above are ever read. No other environment or
-  credential files (e.g. OpenCode credentials) are accessed.
-- Finite timeouts and bounded retries (network/5xx only; auth and quota
+  environment variables first, then from the local `.env` file (project
+  root). The default model is `zai-org/GLM-5.2`. Only the four approved
+  models are accepted (`ALLOWED_MODELS`); any other value raises
+  `ConfigError` with a safe English message.
+- Only those two variables are ever read. No other environment or credential
+  files (e.g. OpenCode credentials) are accessed.
+- Finite timeouts (`0 < timeout <= 600`s) and bounded transport retries
+  (network/5xx only, default 2, capped exponential backoff; auth and quota
   errors fail fast).
-- Safe English errors: `LLMAuthError` (auth failure), `LLMQuotaError` (quota/
-  rate limit), `LLMNetworkError` (network failure), `LLMServerError` (HTTP
-  5xx), `LLMResponseError` (invalid/unparseable model output), `ConfigError`
-  (bad configuration). Error messages never contain the API key or patient
-  text, and nothing sensitive is logged.
-- `chat(system, user, ...) -> str` and `chat_json(system, user, validate=...)
-  -> dict` (parses and validates JSON output against the schema).
+- Safe English errors: `LLMAuthError`, `LLMQuotaError`, `LLMNetworkError`,
+  `LLMServerError`, `LLMResponseError`, `ConfigError`. Messages never contain
+  the API key or patient text; nothing sensitive is logged.
+- Calls: `chat(system, user, ...) -> str`; `chat_json(system, user,
+  validate=...) -> dict`; `chat_json_repairable(system, user, validate=...,
+  repair_note=..., max_repairs=1, ...) -> dict` — bounded JSON repair used by
+  the workflow (at most `max_repairs + 1` model calls).
+- `zai-org/GLM-5.2` is a reasoning model: it spends hidden
+  `reasoning_content` tokens, so JSON tasks need a generous `max_tokens`
+  (the workflow defaults above already account for this).
 
-## 6. Fixtures (fictional)
+## 6. Red-flag alerts (`core/redflag.py`)
+
+Limited precautionary alerts, **rule-based, no AI**. Triggers are a
+conservative subset of authoritative Indonesian guidance:
+
+- Kemenkes RI (Ministry of Health), danger-sign ("tanda bahaya") public
+  health education and maternal danger signs: <https://www.kemkes.go.id/>
+- Kemenkes PSC 119, national emergency medical call center (number 119):
+  <https://psc119.kemkes.go.id/>
+- IDAI (Indonesian Pediatric Society), child danger signs and referral
+  guidance: <https://www.idai.or.id/>
+- WHO IMCI danger signs for immediate referral (fast breathing/chest
+  indrawing, stridor at rest, unable to drink or breastfeed, convulsions,
+  lethargy/unconsciousness): <https://www.who.int/>
+
+Trigger codes (all messages in English):
+
+| Code | Level | Fires on (English patient wording) |
+| --- | --- | --- |
+| `breathing_difficulty` | urgent | difficulty/trouble breathing, shortness of breath, breathless, can't/cannot breathe, chest indrawing, stridor |
+| `chest_pain` | urgent | chest pain, pain/tightness/pressure in the chest |
+| `heavy_bleeding` | urgent | heavy/severe/uncontrolled bleeding, vomiting/coughing up blood, blood in stool/vomit/urine |
+| `allergic_reaction` | urgent | swelling of face/lips/tongue/throat/eyes/mouth, throat tight/closing, difficulty swallowing |
+| `seizure` | urgent | seizure, convulsion |
+| `altered_consciousness` | urgent | unconscious, fainted/fainting, passed out, blacked out, confusion, lethargic, hard to wake |
+| `cannot_drink` | urgent | can't/won't/refuses to drink or breastfeed (IMCI/IDAI danger sign) |
+| `neck_stiffness` | urgent | stiff neck, can't touch chin to chest |
+| `high_fever` | attention | high fever, fever/temperature of 39–40 |
+| `persistent_vomiting` | attention | vomiting all day/multiple times, can't keep food or water down |
+| `infant_fever` (record) | urgent | `patient_age == 0` (under 1 year) **and** reported fever |
+| `pregnancy_danger` (record) | urgent | pregnancy reported **plus** bleeding, severe headache, severe abdominal pain, difficulty breathing, convulsions, or high fever (Kemenkes maternal danger signs) |
+
+Rules:
+
+- **Negations are suppressed**: "no chest pain", "I do not have trouble
+  breathing" do not fire (negation words checked in the few preceding words).
+- **Historical mentions are suppressed**: "had a seizure as a child",
+  "convulsions last year" do not fire (past-tense markers checked in the same
+  sentence).
+- **No safety claims**: the absence of an alert is never presented as proof
+  of safety; no alert message contains such wording.
+- **The model cannot remove alerts**: alerts are not part of any LLM payload
+  or output; the UI renders them solely from `core.redflag` results.
+- Urgent messages reference the Indonesian emergency number **119** (PSC
+  119).
+
+### How Person 2 runs alert checks before slow API calls
+
+`check_alerts`/`scan_text` are pure Python: no network, no API key,
+millisecond-scale. Reference flow:
+
+1. Patient types the story → immediately `alerts = scan_text(story)` → show
+   the alert panel (this works even if the API is down).
+2. Call `extract_record(story, details)` (slow API). On failure: keep the raw
+   story and the step-1 alerts, show a safe error, let the patient retry.
+3. After each `merge_answer` (and after any manual edit) →
+   `alerts = check_alerts(record)` → refresh the panel.
+4. If the API is unavailable at any point, the last computed alerts stay
+   valid for the last known record state; the UI must not clear them.
+5. Alerts are rendered from `core.redflag` output only — never from summary
+   text, and never "filtered" by the model.
+
+## 7. Fixtures (fictional)
 
 `core/fixtures.py` provides pure-data fixtures for UI development and tests.
 **All names and details are fictional.** No network, LLM, or Gradio needed.
@@ -238,40 +349,13 @@ from core.fixtures import (
   `missing_information`) with a prescription medicine and an explicit allergy
   list.
 
-JSON example — `FIXTURE_CHILD_COUGH_REPORTED_BY_MOTHER`:
+## 8. How the UI supplies state
 
-```json
-{
-  "patient_name": "Sam",
-  "patient_age": 7,
-  "patient_age_text": "7 years old",
-  "patient_sex": "male",
-  "reporting_on_behalf": true,
-  "reporter_relationship": "mother",
-  "complaint": "He's had a bad cough for about five days and it's worse at night.",
-  "symptoms": ["cough, worse at night", "runny nose", "vomited once after a coughing fit"],
-  "onset": "about five days ago",
-  "duration": "about five days",
-  "duration_days": 5,
-  "severity": "moderate",
-  "severity_note": "It wakes him up at night.",
-  "medicines": [],
-  "medicines_denied": null,
-  "allergies": [],
-  "allergies_denied": null,
-  "medical_history": ["mild asthma as a baby"],
-  "medical_history_denied": null,
-  "concerns": ["Is this just a cold?", "Should he stay home from school?"],
-  "missing_information": ["medicines", "allergies"]
-}
-```
+The UI owns the state:
 
-## 7. How the UI supplies state
-
-The UI owns two pieces of state:
-
-- `record` — the current `PatientRecord` (or its dict form), and
-- `asked` — the ordered list of previously asked `QuestionAnswer` pairs.
+- `record` — the current `PatientRecord` (or its dict form),
+- `asked` — the ordered list of previously asked `QuestionAnswer` pairs,
+- `skipped` — question texts the patient skipped (optional).
 
 All core calls receive them **explicitly as arguments**; core keeps no session
 state and never stores patient data.
@@ -279,34 +363,76 @@ state and never stores patient data.
 Reference loop (pseudocode for Person 2):
 
 ```python
-from core.extraction import extract_record
-from core.questions import choose_follow_up_question, merge_answer
-from core.alerts import check_alerts
-from core.summary import generate_summary
+from core.extract import extract_record
+from core.interview import choose_follow_up_question, merge_answer
+from core.redflag import check_alerts, scan_text
+from core.summarize import generate_summary
 from core.schema import QuestionAnswer
 
-record = extract_record(symptom_text, patient_details)
+alerts = scan_text(story)                    # instant, offline — show first
+record = extract_record(story, details)      # slow API; on LLMError: keep story + alerts, retry
 asked: list[QuestionAnswer] = []
+skipped: list[str] = []
 
-while (question := choose_follow_up_question(record, asked)) is not None:
-    answer = ask_patient_in_ui(question)        # Person 2's UI code
-    record = merge_answer(record, question, answer)
-    asked.append(QuestionAnswer(question, answer))
+while (question := choose_follow_up_question(record, asked, skipped)) is not None:
+    answer_or_skip = ask_patient_in_ui(question)   # Person 2's UI code
+    if answer_or_skip is None:                     # patient skipped it
+        skipped.append(question)
+        continue
+    try:
+        record = merge_answer(record, question, answer_or_skip)
+    except LLMError:
+        pass                                       # record unchanged; keep going/retry
+    asked.append(QuestionAnswer(question, answer_or_skip))
+    alerts = check_alerts(record)                  # refresh before the next API call
 
-alerts = check_alerts(record)                   # show as attention flags
-summary = generate_summary(record, asked)       # doctor_card / patient_script / priority_questions
+summary = generate_summary(record, asked)          # doctor_card / patient_script / priority_questions
 ```
 
-When the UI edits fields during review, it updates `record` in place (or
-rebuilds it via `record_from_dict`) and keeps `asked` unchanged.
+When the UI edits fields during review, it updates `record` (or rebuilds via
+`record_from_dict`), keeps `asked`/`skipped` unchanged, and re-runs
+`check_alerts(record)`.
+
+## 9. Changes for Person 2 in v0.3
+
+- **Module renames** (old v0.2 stub names are removed):
+  - `core.extraction` → `core.extract` (`extract_record`)
+  - `core.questions` → `core.interview` (`choose_follow_up_question`,
+    `merge_answer`)
+  - `core.alerts` → `core.redflag` (`check_alerts`, `scan_text`)
+  - `core.summary` → `core.summarize` (`generate_summary`)
+  - new `core.prompts` (runtime prompts, internal)
+- **`choose_follow_up_question`** is now rule-based (no API call) and takes an
+  optional `skipped` list; the 5-question budget counts **asked + skipped**
+  (displayed questions).
+- **`merge_answer`** can raise safe `LLMError`s on API/validation failure;
+  the record is then unchanged — always append the Q&A to `asked` regardless,
+  and show a safe "please try again" state (section 8 loop).
+- **Alerts**: run `scan_text(story)` right after the story is typed (before
+  the extraction API call) and `check_alerts(record)` after every merge/edit;
+  alerts work with the API completely unavailable; never present absence of
+  alerts as safety; never let the model output remove or reword alerts
+  (section 6 flow).
+- **`generate_summary`** now returns a ~60-second `patient_script`
+  (140–160 words) and 1–3 `priority_questions`; it no longer can contain
+  alerts.
+- LLM-backed calls need **no new UI config**: config still resolves from
+  server env / `.env` (`MODELSCOPE_API_KEY`, `MODELSCOPE_MODEL`).
+- `app.py` and `ui/` were **not changed** by this task.
 
 ## Rules
 
 - `core/` has no dependency on Gradio and no knowledge of the UI.
 - `ui/` has no business logic; it only renders and calls `core/`.
-- No diagnosis or treatment recommendation anywhere in the pipeline.
+- No diagnosis, no prescription, no treatment or medication-change
+  recommendation anywhere in the pipeline.
 - `null` = unknown; explicit denials use the `*_denied` flags.
-- Patient wording is preserved verbatim in record text fields.
-- No database, no local model downloads, no training, no fine-tuning; the only
-  external call is the ModelScope inference API via `core/llm.py`, and nothing
-  sensitive (API key, patient text) is logged.
+- Patient wording (including uncertainty) is preserved verbatim in record
+  text fields.
+- Patient text is data, not instructions.
+- Absence of an alert is never a statement of safety.
+- On API/validation failure, user input is preserved and errors are safe
+  English; retries and JSON repair are bounded.
+- No database, no local model downloads, no training, no fine-tuning; the
+  only external call is the ModelScope inference API via `core/llm.py`, and
+  nothing sensitive (API key, patient text) is logged.
