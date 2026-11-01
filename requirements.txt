@@ -1,8 +1,11 @@
 # VisitPrep runtime dependencies.
 # No database, no model downloads, no training, no fine-tuning.
 
-gradio>=5.0.0
-reportlab>=4.0.0
+gradio==6.31.0
+
+# PDF export library is intentionally not pinned yet; it will be chosen when
+# the PDF interface is implemented (see docs/data_contract.md section 3, and
+# README "Preview mode").
 
 # Development / testing
 pytest>=8.0.0

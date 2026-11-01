@@ -1,24 +1,17 @@
-"""Welcome screen for VisitPrep.
+"""Entry builder for the VisitPrep UI.
 
-Owned by Person 2.
+Owned by Person 2. ``build_welcome`` builds the full four-step interface; the
+name is kept for backward compatibility with the scaffold's welcome screen and
+its smoke test. See ``ui/flow.py`` for the implementation.
 """
 
 import gradio as gr
 
+from ui.flow import build_interface
+
+__all__ = ["build_welcome"]
+
 
 def build_welcome() -> None:
-    """Render the welcome / start screen into the current Blocks context."""
-    with gr.Column(elem_id="welcome"):
-        gr.Markdown("## Welcome")
-        gr.Markdown(
-            "Report your symptoms in your own words, then answer a few "
-            "clarifying questions so you are ready for your appointment."
-        )
-        gr.Markdown(
-            "### How it works\n"
-            "1. Describe your symptoms.\n"
-            "2. Answer up to five follow-up questions.\n"
-            "3. Review and edit the details.\n"
-            "4. Get a summary, a short doctor script, and a PDF to download."
-        )
-        gr.Button("Start", variant="primary", elem_id="start-button")
+    """Render the full interface into the current Blocks context."""
+    build_interface()

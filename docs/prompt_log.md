@@ -179,3 +179,88 @@ they are given, but they cannot prove a model never invents a denial in
 unseen wording; live effectiveness against GLM-5.2 with the tightened prompts is
 not yet re-verified because of the rate limit. `app.py`, `ui/`, and deployment
 were not modified.
+
+## 6. English Gradio interface on the fictional fixtures (Person 2)
+
+**Model:** DeepSeek V4 Pro
+
+**Prompt:** I am Person 2. Read AGENTS.md and docs/data_contract.md.
+
+Build the English Gradio interface using the shared fictional fixtures until the core pipeline is ready:
+1. Describe your symptoms, including basic patient/reporter details.
+2. Answer one follow-up question at a time, with progress out of five, Skip, and Finish early.
+3. Review and edit symptoms, medicines, allergies/history, and concerns; confirm the record.
+4. View the doctor summary, patient script, priority questions, and PDF download control.
+
+Use per-session state, clear loading/errors, Back and Reset, and readable mobile styling at 375px. Prevent duplicate submissions. Editing information must invalidate previous summaries/downloads; ignore late responses after reset or a newer edit.
+
+Reserve a persistent top area for rule-based alerts. Explain that submitted notes go to ModelScope and ask users to omit identifying details. Do not claim provider-side deletion or immediate deletion on tab close. Render patient text safely.
+
+Keep fixtures clearly labeled, follow the documented interfaces, and leave core/ unchanged. Run the interface locally and check navigation, editing, reset, and mobile layout. Update README setup instructions.
+
+notes for person 2: the summary output changed from the scaffold contract (doctor_summary/pdf_bytes → doctor_card/patient_script/priority_questions); PDF will be a separate core interface (flagged in the contract).
+
+**Outcome:** Implemented the four-step interface. Since the core interfaces
+still raise `NotImplementedError`, added `ui/fixture_backend.py` (a clearly
+labeled, deterministic, no-network dev shim implementing the documented
+interfaces from `core/fixtures.py`) and `ui/backend.py` (a seam that falls back
+to the shim only on `NotImplementedError`, so the real core is used
+automatically once it lands). Built `ui/flow.py` (per-session `gr.State`,
+Back/Reset, fixture loader, persistent alert banner, editable review,
+HTML-escaped patient text, summary invalidation via a revision counter,
+disabled PDF control awaiting the separate core PDF interface) and
+`ui/components.py` (safe rendering + mobile CSS at `@media (max-width: 480px)`).
+Kept `core/` untouched and preserve patient wording verbatim. Checks:
+`pytest -q` → 62 passed (46 core + 16 new UI). Local launch serves the page;
+driving the event handler functions directly confirmed load-fixture → questions
+→ answer → finish → confirm (summary valid) → back (summary invalidated) →
+reset, plus describe-symptoms extraction. README setup/privacy/flow updated.
+
+## 7. Audit fixes for the step-3 interface (Person 2)
+
+**Model:** DeepSeek V4 Pro
+
+**Prompt:** I am Person 2. Read AGENTS.md and docs/data_contract.md before changing anything. Do not modify anything under core/ or tests/test_core/. If a fix needs a core change, write an exact handoff for Person 1 instead.
+
+An audit of the step-3 interface found these defects. Fix each one in app.py, ui/, tests/test_ui/, README.md, requirements.txt, and docs/prompt_log.md only:
+
+1. Business logic in ui/: ui/fixture_backend.py reimplements extraction, answer merging, alert rules, and summary writing. The contract says ui/ has no business logic. Replace it with a minimal, clearly labeled preview backend that only returns the fictional records from core/fixtures.py plus fixed, clearly fictional placeholder questions and summary text. Do not reimplement alert rules or summary composition. If no real alerts are available, show "Alerts unavailable in preview" in the alert area instead of fake alerts.
+
+2. Silent fallback: ui/backend.py must not catch NotImplementedError per call. Choose the backend once at startup with an explicit switch (env var VISITPREP_PREVIEW=1, default off). With preview off and core not implemented, show a clear English error, not fake output. With preview on, the preview banner must be visible on every step. Fixture code must never run unlabeled.
+
+3. Duplicate submissions: your report claimed always_last prevents duplicates, but only the checkbox .change uses it. Disable the action buttons while a handler runs (or use concurrency_id per session with trigger_mode="once"), and re-enable them on success and on error.
+
+4. Late responses: the rev counter is never compared after a slow call. Store a session-level request token. Each handler captures the token at start, and after the core call returns it drops its result if Reset, Back, or a newer edit has changed the token in the meantime. Add a test that simulates confirm → reset → late confirm result and asserts the reset state wins.
+
+5. Age bug (ui/flow.py on_confirm): clearing Age leaves patient_age_text with the old value, so the doctor card still shows it. Clearing the age must set both patient_age and patient_age_text to null. An unchanged age must keep the patient's original wording in patient_age_text.
+
+6. Null vs False: bool(on_behalf_val) turns "unknown" into False. Keep reporting_on_behalf null unless the user explicitly chose yes or no (use a three-option control: not answered / myself / someone else).
+
+7. Privacy contradiction: the privacy note asks users not to enter their name, but Step 1 and Review have a Name field that is sent to the model. Remove the name field from the UI, or keep it local-only and never pass it to core. State which option you chose.
+
+8. Do not swallow alert errors: _render catches every exception from check_alerts and shows nothing. Show a visible "Alerts could not be checked" message instead.
+
+9. Alert placement: move the alert area directly under the app title, above the privacy note, preview banner, and sample loader, so it is visible without scrolling at 375px.
+
+10. Dead or misleading code: fix the CSS selectors that start with "#visitprep-root .gradio-container" (that element is an ancestor, so they never match), make nl2br either escape its input or rename it and fix its docstring, remove the unused subs dict, and wrap FIXTURE_BANNER in the .fixture-box element. Prefer passing the CSS through the official Gradio 6 css parameter (check whether it belongs to launch() or Blocks() in the installed version) over injecting a <style> tag through gr.HTML.
+
+11. Real UI tests: add tests in tests/test_ui/ that call the actual event handlers (extract them so they can be imported, or reach them through demo.fns) and cover: start → answer → skip → finish → confirm; the five-question cap including skips; Back from the summary invalidates it; Reset clears state; the age-clearing bug; reporting_on_behalf stays null; patient text with <script> and <img onerror> is escaped in every HTML output; step guards ignore clicks from the wrong step; the late-response test from item 4.
+
+12. requirements.txt: pin gradio to the version you actually tested (currently 6.31.0), because launch(theme=...) does not exist in Gradio 5. Leave the PDF library choice for step 5 and note it in README as pending.
+
+13. docs/prompt_log.md: append a new entry 5 for this fix round, containing the exact prompt text I pasted (verbatim, not a summary) and the model actually used. Correct entry 4 so it states the model used (DeepSeek V4 Pro), and replace the paraphrased prompt with the exact step-3 prompt text. Keep entries 1–3 byte-for-byte unchanged and keep the file's existing line endings, so git does not show Person 1's entries as modified.
+
+After the fixes, run `python -m pytest -q`, launch the app locally, and check navigation, editing, reset, and 375px layout. Report the actual results: the test count split into core and UI, which items you fixed, and anything you could not verify. Do not claim a check you did not run. Do not commit; I will review first. If any item is ambiguous, ask me before implementing it.
+
+**Outcome:** Replaced the preview backend with a no-business-logic stub that
+only returns fictional fixtures plus fixed placeholder questions/summary text;
+made ui/backend.py switch once on VISITPREP_PREVIEW (default off) with a clear
+error when core is unavailable; disabled duplicate submissions via
+trigger_mode="once"; added a session request token with commit_if_current (with
+a confirm→reset→late-confirm test); fixed the age-clearing bug; switched
+reporting_on_behalf to a three-option Radio that preserves null; removed the
+name field entirely (item 7 option: remove, never pass name to core); surfaced
+"Alerts unavailable in preview" / "Alerts could not be checked"; moved the alert
+area under the title; cleaned CSS selectors, nl2br, and the fixture-box banner;
+moved CSS into launch(css=...); pinned gradio==6.31.0 and unpinned the PDF
+library; added real handler tests via demo.fns. Checks below.
