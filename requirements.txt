@@ -1,0 +1,8 @@
+# VisitPrep runtime dependencies.
+# No database, no model downloads, no training, no fine-tuning.
+
+gradio>=5.0.0
+reportlab>=4.0.0
+
+# Development / testing
+pytest>=8.0.0

@@ -1,0 +1,43 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.whl
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+Env/
+
+# ---- Secrets & environment ----
+.env
+.env.*
+!.env.example
+
+# ---- Caches ----
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ---- Generated patient data & downloads (private) ----
+# Ignore all generated contents but keep the placeholder tracked.
+data/*
+!data/.gitkeep
+
+# ---- Tooling / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# ---- Gradio ----
+gradio_cached_examples/
