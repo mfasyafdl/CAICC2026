@@ -94,15 +94,21 @@ def test_medicines_ignores_blank_lines():
     assert medicines_from_text("\n\n") == []
 
 
-def test_start_answer_skip_finish_confirm_flow(handlers):
-    state = handlers["on_start"](None, "A dry cough", None, "", "Not answered", "")[0]
-    assert state["step"] == 2
+def test_start_extracts_a_record(handlers):
+    state = handlers["on_start"](None, "a dry cough", None, "")[0]
+    assert state["record"] is not None
+    assert state["step"] in (2, 3)
 
-    state = handlers["on_answer"](state, "about three days")[0]
-    assert state["step"] == 2 and len(state["asked"]) == 1
+
+def test_answer_skip_finish_confirm_flow(handlers):
+    state = handlers["on_load_fixture"](None, "FIXTURE_CHILD_COUGH_REPORTED_BY_MOTHER")[0]
+    assert state["step"] == 2 and state["question"]
+
+    state = handlers["on_answer"](state, "no medicines, only honey tea")[0]
+    assert len(state["asked"]) == 1
 
     state = handlers["on_skip"](state)[0]
-    assert len(state["asked"]) == 2
+    assert len(state["skipped"]) == 1
 
     state = handlers["on_finish"](state)[0]
     assert state["step"] == 3
@@ -112,13 +118,24 @@ def test_start_answer_skip_finish_confirm_flow(handlers):
     assert state["summary"] and state["summary_rev"] == state["rev"]
 
 
-def test_five_question_cap_including_skips(handlers):
-    state = handlers["on_load_fixture"](None, "FIXTURE_CHILD_COUGH_REPORTED_BY_MOTHER")[0]
+def test_five_question_cap_covers_skips(handlers):
+    state = handlers["on_load_fixture"](None, "FIXTURE_EMPTY_RECORD")[0]
     assert state["step"] == 2
     for _ in range(5):
         state = handlers["on_skip"](state)[0]
     assert state["step"] == 3
-    assert len(state["asked"]) == 5
+    assert len(state["skipped"]) == 5
+    assert len(state["asked"]) == 0
+
+
+def test_five_question_cap_counts_asked_and_skipped(handlers):
+    state = handlers["on_load_fixture"](None, "FIXTURE_EMPTY_RECORD")[0]
+    for _ in range(3):
+        state = handlers["on_answer"](state, "mild")[0]
+    for _ in range(2):
+        state = handlers["on_skip"](state)[0]
+    assert state["step"] == 3
+    assert len(state["asked"]) + len(state["skipped"]) == 5
 
 
 def test_back_from_summary_invalidates(handlers):
@@ -139,6 +156,7 @@ def test_reset_clears_state(handlers):
     assert state["step"] == 1
     assert state["record"] is None
     assert state["asked"] == []
+    assert state["skipped"] == []
     assert state["summary"] is None
 
 
@@ -171,10 +189,8 @@ def test_reporting_on_behalf_stays_null_when_not_answered(handlers):
 
 def test_step_guards_ignore_clicks_from_wrong_step(handlers):
     fresh = new_state()
-    # From step 1, an answer click is ignored.
     out = handlers["on_answer"](fresh, "hello")
     assert out[0]["step"] == 1 and out[0]["record"] is None
-    # From step 1, a confirm click is ignored.
     out = handlers["on_confirm"](fresh, *_confirm_args({
         "complaint": "x", "symptoms": [], "onset": None, "duration": None,
         "severity": None, "severity_note": None, "medicines": [],

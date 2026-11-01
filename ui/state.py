@@ -1,8 +1,9 @@
 """Per-session state helpers for the VisitPrep UI.
 
 Owned by Person 2. Session state holds the current record, the ordered list of
-asked questions, the current step, any generated summary, and a request token
-used to drop stale responses that arrive after Reset, Back, or a newer edit.
+asked questions, the list of skipped question texts, the currently computed
+alerts, the current step, any generated summary, and a request token used to
+drop stale responses that arrive after Reset, Back, or a newer edit.
 
 These are UI bookkeeping primitives only; there is no business logic here.
 """
@@ -15,6 +16,9 @@ def new_state() -> dict:
     return {
         "record": None,
         "asked": [],
+        "skipped": [],
+        "alerts": [],
+        "alerts_error": False,
         "step": 1,
         "summary": None,
         "summary_rev": -1,

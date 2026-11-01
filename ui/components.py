@@ -45,16 +45,6 @@ def alerts_html(alerts) -> str:
     return '<div class="alerts">%s</div>' % "".join(parts)
 
 
-def alerts_unavailable_html() -> str:
-    """Show a visible note when no real alerts are available (preview)."""
-    return (
-        '<div class="alerts"><div class="alert alert-attention">'
-        '<span class="alert-badge">Info</span>'
-        '<span class="alert-msg">Alerts unavailable in preview.</span>'
-        "</div></div>"
-    )
-
-
 def alerts_error_html() -> str:
     """Show a visible note when alerts could not be checked."""
     return (
@@ -175,6 +165,7 @@ MOBILE_CSS = """
   border-radius: 8px;
   padding: 12px 14px;
   background: #f9fafb;
+  color: #1f2937;
   white-space: pre-wrap;
   word-wrap: break-word;
   font-size: 0.98rem;

@@ -264,3 +264,37 @@ name field entirely (item 7 option: remove, never pass name to core); surfaced
 area under the title; cleaned CSS selectors, nl2br, and the fixture-box banner;
 moved CSS into launch(css=...); pinned gradio==6.31.0 and unpinned the PDF
 library; added real handler tests via demo.fns. Checks below.
+
+## 8. Rebase reconciliation onto the v0.3 core (Person 2)
+
+**Model:** DeepSeek V4 Pro
+
+**Prompt:** Additional context from a review of the current repo state (HEAD cec1abb, rebased on Person 1's 6e51a08 "feat: add ai workflow"). Read the updated docs/data_contract.md first; it was largely rewritten.
+
+Current failures you must fix first:
+- Person 1 deleted core/alerts.py, core/extraction.py, core/questions.py, core/summary.py and replaced them with core/extract.py (extract_record), core/interview.py (choose_follow_up_question, merge_answer, MAX_DISPLAYED_QUESTIONS), core/redflag.py (check_alerts), core/summarize.py (generate_summary). ui/backend.py still imports the old modules, so the app crashes at import without VISITPREP_PREVIEW=1 (ModuleNotFoundError: core.alerts, ui/backend.py line 71).
+- core.interview.choose_follow_up_question now has the signature (record, asked, skipped=None, max_questions=MAX_DISPLAYED_QUESTIONS). ui/backend.py passes max_questions positionally, so it lands in skipped. Pass every optional argument by keyword.
+- The UI stores a skipped question as QuestionAnswer(question, "") inside asked. Follow the new contract for skips: keep a separate skipped list in session state and pass it to core. The five-question cap must still count skipped questions.
+- tests/test_ui/test_backend.py::test_preview_off_with_core_stub_raises_not_implemented fails because core is no longer a stub. Replace it with a test for the real-core path (fake the LLM transport; no network in tests).
+
+Remaining UI defects from the live audit at 375px:
+- Dark mode: .question-box and .summary-box set a light background but no text color, so the text is almost invisible (rgb 243,244,246 on 249,250,251). Set both colors explicitly, or use Gradio theme variables for both.
+- The alert area is at the top and does not follow scrolling, so on step 4 an urgent alert is off-screen while the user reads the summary. Repeat the current alerts at the top of step 4 (or make the alert area sticky), and keep the text escaped.
+- Three error Markdown components share elem_id="error". Give each a unique id.
+
+Rules: do not modify core/ or tests/test_core/. If the new core is missing something the UI needs, write an exact handoff for Person 1 instead. Do not touch the user's running instance on port 7860. Do not commit or push.
+
+Report the actual results: pytest totals split into core and UI, whether app.py starts without VISITPREP_PREVIEW, one full fictional run with the real model (or say it is pending if no API key is configured), and which items you could not verify. Append this prompt verbatim as section 8 of docs/prompt_log.md, with the model actually used, and do not change sections 1 to 7.
+
+**Outcome:** Reconciled the UI with the v0.3 core. ui/backend.py now imports
+core.extract / core.interview / core.redflag / core.summarize: the rule-based
+calls (choose_follow_up_question, check_alerts, scan_text) are always real, and
+the three LLM calls switch on VISITPREP_PREVIEW. choose_follow_up_question is
+called with keyword arguments, and skips go to a separate state["skipped"] list
+(the displayed-question budget counts asked + skipped). Replaced the stub-era
+subprocess test with a real-core-path test that fakes the LLM HTTP transport
+(no network). UI defects: explicit text color on .question-box/.summary-box,
+alerts repeated at the top of step 4, and unique error elem ids. Checks:
+pytest 132 passed (105 core + 27 UI); app.py builds and serves without
+VISITPREP_PREVIEW; the live-model fictional run is pending (no
+MODELSCOPE_API_KEY configured).

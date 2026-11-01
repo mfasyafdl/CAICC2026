@@ -1,14 +1,13 @@
 """The four-step VisitPrep interface (Gradio Blocks).
 
 Owned by Person 2. This module renders the interface and wires the glue that
-calls core/ (through ``ui.backend``). Per-session state (the current record and
-the list of asked questions) is held in a ``gr.State`` dict and passed to core
-calls as arguments; core stays stateless.
+calls core/ (through ``ui.backend``). Per-session state (the current record,
+the asked questions, and the skipped questions) is held in a ``gr.State`` dict
+and passed to core calls as arguments; core stays stateless.
 
 The flow:
 
-1. Describe symptoms (plus optional age and sex, and who the symptoms are
-   about).
+1. Describe symptoms (plus optional age and sex).
 2. Answer follow-up questions one at a time (progress out of five, Skip,
    Finish early).
 3. Review & edit symptoms, medicines, allergies/history, and concerns, then
@@ -43,7 +42,6 @@ from ui.components import (
     PRIVACY_NOTE,
     alerts_error_html,
     alerts_html,
-    alerts_unavailable_html,
     esc,
     priority_list_html,
     question_box_html,
@@ -139,6 +137,8 @@ def _safe_llm_message(exc: Exception) -> str:
         return str(exc)
     if isinstance(exc, SchemaError):
         return "The submitted information could not be processed. Please try again."
+    if isinstance(exc, ValueError):
+        return "The submitted information could not be processed. Please try again."
     return "Something went wrong. Please try again."
 
 
@@ -161,14 +161,27 @@ def build_interface() -> None:
             return None
         return age if 0 <= age <= 130 else None
 
+    def _refresh_alerts_from_record(state: dict, record) -> None:
+        try:
+            state["alerts"] = backend.check_alerts(record)
+            state["alerts_error"] = False
+        except Exception:
+            state["alerts"] = []
+            state["alerts_error"] = True
+
+    def _refresh_alerts_from_text(state: dict, *texts: str) -> None:
+        try:
+            state["alerts"] = backend.scan_text(*texts)
+            state["alerts_error"] = False
+        except Exception:
+            state["alerts"] = []
+            state["alerts_error"] = True
+
     with gr.Column(elem_id="visitprep-root"):
         register("title", gr.Markdown("# VisitPrep"))
         register(
             "alerts",
-            gr.HTML(
-                value=alerts_unavailable_html() if backend.preview_mode() else alerts_html([]),
-                elem_id="alerts-area",
-            ),
+            gr.HTML(value=alerts_html([]), elem_id="alerts-area"),
         )
         register(
             "subtitle",
@@ -176,13 +189,6 @@ def build_interface() -> None:
                 "Turn what you report into a clear summary and a short script "
                 "to read to your doctor. VisitPrep does not diagnose or advise."
             ),
-        )
-
-        show_core_notice = (not backend.preview_mode()) and (not backend.core_available())
-        gr.Markdown(
-            backend.CORE_UNAVAILABLE_NOTICE,
-            visible=show_core_notice,
-            elem_id="core-notice",
         )
 
         register("privacy", gr.Markdown(PRIVACY_NOTE, elem_id="privacy-note"))
@@ -220,7 +226,7 @@ def build_interface() -> None:
             gr.Markdown("### Step 1 of 4 — Describe your symptoms")
             gr.Markdown(
                 "Write your symptoms in your own words. Age and sex are "
-                "optional, and are not required."
+                "optional."
             )
             symptom_text = gr.Textbox(
                 label="Symptoms",
@@ -230,13 +236,7 @@ def build_interface() -> None:
             with gr.Row():
                 patient_age = gr.Number(label="Age (optional)", precision=0)
                 patient_sex = gr.Dropdown(choices=SEX_CHOICES, label="Sex (optional)", value="")
-            reporting = gr.Radio(
-                choices=REPORTING_CHOICES,
-                value="Not answered",
-                label="Who are these symptoms about?",
-            )
-            reporter_rel = gr.Textbox(label="Your relationship to the patient", visible=False)
-            s1_error = gr.Markdown("", visible=False, elem_id="error")
+            s1_error = gr.Markdown("", visible=False, elem_id="s1-error")
             continue_button = gr.Button("Continue", variant="primary")
         register("s1", s1)
 
@@ -248,7 +248,8 @@ def build_interface() -> None:
             q_progress = gr.Markdown("")
             q_box = gr.HTML("")
             answer_input = gr.Textbox(label="Your answer", lines=2)
-            s2_error = gr.Markdown("", visible=False, elem_id="error")
+            s2_error = gr.Markdown("", visible=False, elem_id="s2-error")
+            s2_notice = gr.Markdown("", visible=False, elem_id="s2-notice")
             with gr.Row():
                 answer_button = gr.Button("Answer", variant="primary")
                 skip_button = gr.Button("Skip")
@@ -297,7 +298,7 @@ def build_interface() -> None:
                     label="Who are these symptoms about?",
                 )
                 review_rel = gr.Textbox(label="Reporter relationship")
-            s3_error = gr.Markdown("", visible=False, elem_id="error")
+            s3_error = gr.Markdown("", visible=False, elem_id="s3-error")
             confirm_button = gr.Button("Confirm record", variant="primary")
             back3_button = gr.Button("Back to questions", variant="secondary", size="sm")
         register("s3", s3)
@@ -307,6 +308,7 @@ def build_interface() -> None:
         # ----------------------------------------------------------------
         with gr.Column(elem_id="step-4", visible=False) as s4:
             gr.Markdown("### Step 4 of 4 — Your visit summary")
+            step4_alerts = gr.HTML("")
             gr.Markdown("#### For the doctor")
             doctor_card = gr.HTML("")
             gr.Markdown("#### What to say (patient script)")
@@ -325,15 +327,15 @@ def build_interface() -> None:
     # Register the remaining managed components in display order so every event
     # returns updates in a stable, consistent sequence.
     for name in [
-        "symptom_text", "patient_age", "patient_sex", "reporting", "reporter_rel",
-        "s1_error",
-        "q_progress", "q_box", "answer_input", "s2_error",
+        "symptom_text", "patient_age", "patient_sex", "s1_error",
+        "q_progress", "q_box", "answer_input", "s2_error", "s2_notice",
         "review_complaint", "review_symptoms", "review_onset", "review_duration",
         "review_severity", "review_severity_note", "review_medicines",
         "review_medicines_none", "review_allergies", "review_allergies_none",
         "review_history", "review_history_none", "review_concerns",
         "review_age", "review_sex", "review_reporting", "review_rel", "s3_error",
-        "doctor_card", "patient_script", "priority_questions", "pdf_note",
+        "step4_alerts", "doctor_card", "patient_script", "priority_questions",
+        "pdf_note",
     ]:
         components[name] = locals()[name]
         order.append(name)
@@ -361,22 +363,17 @@ def build_interface() -> None:
         update["fixture_row"] = gr.update(visible=backend.preview_mode())
 
         # Persistent rule-based alert area (directly under the title).
-        if backend.preview_mode():
-            update["alerts"] = gr.update(value=alerts_unavailable_html())
-        elif record is not None:
-            try:
-                alerts = backend.check_alerts(record)
-            except Exception:
-                update["alerts"] = gr.update(value=alerts_error_html())
-            else:
-                update["alerts"] = gr.update(value=alerts_html(alerts))
+        if state.get("alerts_error"):
+            update["alerts"] = gr.update(value=alerts_error_html())
         else:
-            update["alerts"] = gr.update(value=alerts_html([]))
+            update["alerts"] = gr.update(value=alerts_html(state.get("alerts") or []))
 
         if step == 2:
             question = state.get("question")
             asked = state.get("asked") or []
-            progress_number = min(len(asked) + 1, max_questions)
+            skipped = state.get("skipped") or []
+            display_count = len(asked) + len(skipped)
+            progress_number = min(display_count + 1, max_questions)
             update["q_progress"] = gr.update(
                 value=f"Question **{progress_number} of {max_questions}**"
             )
@@ -408,6 +405,10 @@ def build_interface() -> None:
             )
 
         if step == 4:
+            alerts = state.get("alerts") or []
+            update["step4_alerts"] = gr.update(
+                value=alerts_html(alerts) if alerts else ""
+            )
             summary = state.get("summary")
             current = summary if state.get("summary_rev") == state.get("rev") else None
             if current:
@@ -463,34 +464,41 @@ def build_interface() -> None:
     def on_toggle_reporting(value):
         return gr.update(visible=(value == "Someone else"))
 
-    def on_start(state, symptoms, age, sex, reporting_val, rel):
+    def on_start(state, symptoms, age, sex):
         state = copy.deepcopy(state) if state else new_state()
         if state.get("step") != 1:
             return _out(state)
         symptoms = (symptoms or "").strip()
         if not symptoms:
             return _error(state, "s1_error", "Please describe your symptoms first.")
-        details = {
-            "age": _coerce_age(age),
-            "sex": sex or None,
-            "reporting_on_behalf": _label_to_reporting(reporting_val),
-            "reporter_relationship": (rel or "").strip() or None,
-        }
+
+        _refresh_alerts_from_text(state, symptoms)
+
+        details = {}
+        age_value = _coerce_age(age)
+        if age_value is not None:
+            details["patient_age"] = age_value
+        if sex in SEX_VALUES:
+            details["patient_sex"] = sex
+
         captured = state["token"]
         try:
             record = backend.extract_record(symptoms, details)
-        except NotImplementedError:
-            return _error(state, "s1_error", backend.CORE_UNAVAILABLE_NOTICE)
         except Exception as exc:
             return _error(state, "s1_error", _safe_llm_message(exc))
+
         state = commit_if_current(state, captured, state)
         touch(state)
         state["rev"] += 1
         state["record"] = record_to_dict(record)
         state["asked"] = []
+        state["skipped"] = []
         state["summary"] = None
         state["summary_rev"] = -1
-        state["question"] = backend.choose_follow_up_question(record, state["asked"])
+        _refresh_alerts_from_record(state, record)
+        state["question"] = backend.choose_follow_up_question(
+            record, state["asked"], state["skipped"]
+        )
         state["step"] = 2 if state["question"] is not None else 3
         return _out(state, {"s1_error": gr.update(value="", visible=False)})
 
@@ -501,23 +509,43 @@ def build_interface() -> None:
         reply = (answer or "").strip()
         if not reply:
             return _error(state, "s2_error", "Type an answer, or choose Skip.")
+
         captured = state["token"]
         record = _dict_to_record(state["record"])
+        merge_failed = False
         try:
             record = backend.merge_answer(record, state["question"], reply)
-        except NotImplementedError:
-            return _error(state, "s2_error", backend.CORE_UNAVAILABLE_NOTICE)
-        except Exception as exc:
-            return _error(state, "s2_error", _safe_llm_message(exc))
+        except Exception:
+            merge_failed = True
+            record = record if record is not None else empty_record()
+
         state = commit_if_current(state, captured, state)
         touch(state)
         state["rev"] += 1
         state["asked"].append(QuestionAnswer(state["question"], reply))
         state["record"] = record_to_dict(record)
-        state["question"] = backend.choose_follow_up_question(record, state["asked"])
+        state["summary"] = None
+        state["summary_rev"] = -1
+        _refresh_alerts_from_record(state, record)
+        state["question"] = backend.choose_follow_up_question(
+            record, state["asked"], state["skipped"]
+        )
         if state["question"] is None:
             state["step"] = 3
-        return _out(state, {"s2_error": gr.update(value="", visible=False)})
+
+        notice = (
+            "Your answer was saved, but VisitPrep could not process it right "
+            "now. You can continue."
+            if merge_failed
+            else ""
+        )
+        return _out(state, {
+            "s2_error": gr.update(value="", visible=False),
+            "s2_notice": gr.update(
+                value="**" + esc(notice) + "**" if notice else "",
+                visible=bool(notice),
+            ),
+        })
 
     def on_skip(state):
         state = copy.deepcopy(state) if state else new_state()
@@ -525,12 +553,17 @@ def build_interface() -> None:
             return _out(state)
         touch(state)
         state["rev"] += 1
-        state["asked"].append(QuestionAnswer(state["question"], ""))
+        state["skipped"].append(state["question"])
         record = _dict_to_record(state["record"])
-        state["question"] = backend.choose_follow_up_question(record, state["asked"])
+        state["question"] = backend.choose_follow_up_question(
+            record, state["asked"], state["skipped"]
+        )
         if state["question"] is None:
             state["step"] = 3
-        return _out(state, {"s2_error": gr.update(value="", visible=False)})
+        return _out(state, {
+            "s2_error": gr.update(value="", visible=False),
+            "s2_notice": gr.update(value="", visible=False),
+        })
 
     def on_finish(state):
         state = copy.deepcopy(state) if state else new_state()
@@ -553,13 +586,6 @@ def build_interface() -> None:
             "symptom_text": gr.update(value=(record.complaint or "") if record else ""),
             "patient_age": gr.update(value=(record.patient_age if record else None)),
             "patient_sex": gr.update(value=(record.patient_sex or "") if record else ""),
-            "reporting": gr.update(
-                value=_reporting_to_label(record.reporting_on_behalf) if record else "Not answered"
-            ),
-            "reporter_rel": gr.update(
-                value=(record.reporter_relationship or "") if record else "",
-                visible=(record.reporting_on_behalf is True) if record else False,
-            ),
             "s1_error": gr.update(value="", visible=False),
         }
         return _out(state, overrides)
@@ -572,7 +598,9 @@ def build_interface() -> None:
         state["rev"] += 1
         record = _dict_to_record(state.get("record"))
         base = record if record is not None else empty_record()
-        state["question"] = backend.choose_follow_up_question(base, state["asked"])
+        state["question"] = backend.choose_follow_up_question(
+            base, state["asked"], state["skipped"]
+        )
         state["step"] = 2 if state["question"] is not None else 3
         return _out(state)
 
@@ -639,8 +667,6 @@ def build_interface() -> None:
         captured = state["token"]
         try:
             summary = backend.generate_summary(record, state["asked"])
-        except NotImplementedError:
-            return _minimal_error(state, "s3_error", backend.CORE_UNAVAILABLE_NOTICE, 3)
         except Exception as exc:
             return _minimal_error(state, "s3_error", _safe_llm_message(exc), 3)
 
@@ -648,6 +674,7 @@ def build_interface() -> None:
         touch(state)
         state["rev"] += 1
         state["record"] = record_to_dict(record)
+        _refresh_alerts_from_record(state, record)
         state["summary"] = {
             "doctor_card": summary.doctor_card,
             "patient_script": summary.patient_script,
@@ -676,10 +703,9 @@ def build_interface() -> None:
             "symptom_text": gr.update(value=""),
             "patient_age": gr.update(value=None),
             "patient_sex": gr.update(value=""),
-            "reporting": gr.update(value="Not answered"),
-            "reporter_rel": gr.update(value="", visible=False),
             "s1_error": gr.update(value="", visible=False),
             "s2_error": gr.update(value="", visible=False),
+            "s2_notice": gr.update(value="", visible=False),
             "s3_error": gr.update(value="", visible=False),
         })
 
@@ -693,9 +719,13 @@ def build_interface() -> None:
         state["rev"] += 1
         state["record"] = record_to_dict(record)
         state["asked"] = []
+        state["skipped"] = []
         state["summary"] = None
         state["summary_rev"] = -1
-        state["question"] = backend.choose_follow_up_question(record, state["asked"])
+        _refresh_alerts_from_record(state, record)
+        state["question"] = backend.choose_follow_up_question(
+            record, state["asked"], state["skipped"]
+        )
         state["step"] = 2 if state["question"] is not None else 3
         return _out(state)
 
@@ -704,12 +734,11 @@ def build_interface() -> None:
     # ------------------------------------------------------------------ #
     state_component = gr.State(value=new_state())
 
-    reporting.change(fn=on_toggle_reporting, inputs=reporting, outputs=reporter_rel)
     review_reporting.change(fn=on_toggle_reporting, inputs=review_reporting, outputs=review_rel)
 
     continue_button.click(
         fn=on_start,
-        inputs=[state_component, symptom_text, patient_age, patient_sex, reporting, reporter_rel],
+        inputs=[state_component, symptom_text, patient_age, patient_sex],
         outputs=[state_component] + [components[n] for n in order],
         trigger_mode="once",
     )
